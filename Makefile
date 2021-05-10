@@ -10,4 +10,4 @@ cmd/%: FORCE
 
 clean:
 	@echo "$@"
-	@rm -rf ./bin ./tmp
+	@rm -rf ./bin/bitswap-cannon

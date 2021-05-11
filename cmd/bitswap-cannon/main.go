@@ -51,10 +51,11 @@ func main() {
     var bufferSize int
     flag.IntVar(&bufferSize, "b", 4096, "size of reader buffer (bytes)")
 
-    var filenames, leechers, seeders flagList
+    var filenames, leechers, seeders, unallocateds flagList
     flag.Var(&filenames, "f", "filename(s) to process")
     flag.Var(&leechers, "l", "host to leech file(s)")
     flag.Var(&seeders, "s", "host to seed file(s)")
+    flag.Var(&unallocateds, "u", "unallocated hosts (to include in output)")
 
     flag.Parse()
 
@@ -124,48 +125,45 @@ func main() {
     }
 
     // wait for all retrievals to complete
-    hostDurations := make(map[string]time.Duration)
+    leecherDurations := make(map[string]time.Duration)
     for i := 0; i < len(cids) * len(leechers); i++ {
-        hostDuration := <- ch
+        leecherDuration := <- ch
 
         // TODO - max of Host? (will receive one for each cid)
-        hostDurations[hostDuration.Host] = hostDuration.Duration
+        leecherDurations[leecherDuration.Host] = leecherDuration.Duration
     }
 
     // output stats
-    hosts := make([]Host, len(seeders) + len(leechers))
+    hosts := make([]Host, len(leechers) + len(seeders) + len(unallocateds))
     hostsIndex := 0
 
-    for _, seeder := range seeders {
-        sh := shell.NewShell(seeder)
-
-        var bitswapStat BitswapStat
-        err := sh.Request("bitswap/stat").
-            Exec(context.Background(), &bitswapStat)
-        if err != nil {
-            fmt.Println("failed to retrieve stats:", err)
-            continue
-        }
-
-        var t time.Duration
-        hosts[hostsIndex] = Host{"Seeder", seeder, t, bitswapStat}
-        hostsIndex += 1
+    hostAddrsMap := map[string][]string{
+        "Leecher": leechers,
+        "Seeder": seeders,
+        "Unallocated": unallocateds,
     }
 
-    for _, leecher := range leechers {
-        sh := shell.NewShell(leecher)
+    for hostType, hostAddrsList := range hostAddrsMap {
+        for _, hostAddr := range hostAddrsList {
+            sh := shell.NewShell(hostAddr)
 
-        var bitswapStat BitswapStat
-        err := sh.Request("bitswap/stat").
-            Exec(context.Background(), &bitswapStat)
-        if err != nil {
-            fmt.Println("failed to retrieve stats:", err)
-            continue
+            var bitswapStat BitswapStat
+            err := sh.Request("bitswap/stat").
+                Exec(context.Background(), &bitswapStat)
+            if err != nil {
+                fmt.Println("failed to retrieve stats:", err)
+                continue
+            }
+
+            var t time.Duration
+            leecherDuration, exists := leecherDurations[hostAddr]
+            if exists {
+                t = leecherDuration
+            }
+
+            hosts[hostsIndex] = Host{hostType, hostAddr, t, bitswapStat}
+            hostsIndex += 1
         }
-
-        duration, _ := hostDurations[leecher]
-        hosts[hostsIndex] = Host{"Leecher", leecher, duration, bitswapStat}
-        hostsIndex += 1
     }
 
     hostsJSON, err := json.MarshalIndent(hosts, "", "  ")

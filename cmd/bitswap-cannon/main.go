@@ -1,11 +1,12 @@
 package main
 
 import (
+    "context"
+    "encoding/json"
     "flag"
     "fmt"
     "io"
     "strings"
-    "sync"
     "time"
     "os"
 
@@ -21,6 +22,28 @@ func (i *flagList) Set(value string) error {
 
 func (i *flagList) String() string {
     return strings.Join(*i, ",")
+}
+
+type BitswapStat struct {
+    BlocksReceived uint64
+    BlocksSent uint64
+    DataReceived uint64
+    DataSent uint64
+    DupBlksReceived uint64
+    DupDataReceived uint64
+    MessagesReceived uint64
+}
+
+type Host struct {
+    Type string
+    Addr string
+    DurationNs time.Duration `json:",omitempty"`
+    BitswapStat BitswapStat
+}
+
+type HostDuration struct {
+    Host string
+    Duration time.Duration
 }
 
 func main() {
@@ -42,10 +65,6 @@ func main() {
         os.Exit(1)
     }
 
-    //fmt.Println("filenames:", filenames)
-    //fmt.Println("leechers:", leechers)
-    //fmt.Println("seeders:", seeders)
-
     // add file(s) to seeders
     cids := make([]string, len(filenames))
     for _, seeder := range seeders {
@@ -64,20 +83,16 @@ func main() {
                 continue
             }
 
-            fmt.Println(filename + " " + cid)
             cids[fileIndex] = cid
         }
     }
 
     // cat file(s) (to nowhere) from each leecher
-    var wg sync.WaitGroup
-    for _, leecher := range leechers {
-        sh := shell.NewShell(leecher)
-
-        for _, cid := range cids {
-            wg.Add(1)
-            go func() {
-                defer wg.Done()
+    ch := make(chan HostDuration)
+    for _, cid := range cids {
+        for _, leecher := range leechers {
+            go func(cid string, leecher string) {
+                sh := shell.NewShell(leecher)
                 start := time.Now()
 
                 r, err := sh.Cat(cid)
@@ -98,20 +113,67 @@ func main() {
                 }
 
                 elapsed := time.Since(start)
-                fmt.Println("retrieved file in", elapsed)
+                ch <- HostDuration{leecher, elapsed}
 
                 err = r.Close()
                 if err != nil {
                     fmt.Println("failed to close reader:", err)
                 }
-            }()
+            }(cid, leecher)
         }
     }
 
     // wait for all retrievals to complete
-    wg.Wait()
+    hostDurations := make(map[string]time.Duration)
+    for i := 0; i < len(cids) * len(leechers); i++ {
+        hostDuration := <- ch
 
-    // TODO - output stats
+        // TODO - max of Host? (will receive one for each cid)
+        hostDurations[hostDuration.Host] = hostDuration.Duration
+    }
+
+    // output stats
+    hosts := make([]Host, len(seeders) + len(leechers))
+    hostsIndex := 0
+
+    for _, seeder := range seeders {
+        sh := shell.NewShell(seeder)
+
+        var bitswapStat BitswapStat
+        err := sh.Request("bitswap/stat").
+            Exec(context.Background(), &bitswapStat)
+        if err != nil {
+            fmt.Println("failed to retrieve stats:", err)
+            continue
+        }
+
+        var t time.Duration
+        hosts[hostsIndex] = Host{"Seeder", seeder, t, bitswapStat}
+        hostsIndex += 1
+    }
+
+    for _, leecher := range leechers {
+        sh := shell.NewShell(leecher)
+
+        var bitswapStat BitswapStat
+        err := sh.Request("bitswap/stat").
+            Exec(context.Background(), &bitswapStat)
+        if err != nil {
+            fmt.Println("failed to retrieve stats:", err)
+            continue
+        }
+
+        duration, _ := hostDurations[leecher]
+        hosts[hostsIndex] = Host{"Leecher", leecher, duration, bitswapStat}
+        hostsIndex += 1
+    }
+
+    hostsJSON, err := json.MarshalIndent(hosts, "", "  ")
+    if err != nil {
+        fmt.Println("failed to marshal hosts as json:", err)
+    }
+
+    fmt.Println(string(hostsJSON))
 
     // TODO - cleanup
 }

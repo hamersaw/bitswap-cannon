@@ -13,14 +13,14 @@ import (
     shell "github.com/ipfs/go-ipfs-api"
 )
 
-type flagList []string
+type FlagList []string
 
-func (i *flagList) Set(value string) error {
+func (i *FlagList) Set(value string) error {
     *i = append(*i, value)
     return nil
 }
 
-func (i *flagList) String() string {
+func (i *FlagList) String() string {
     return strings.Join(*i, ",")
 }
 
@@ -51,7 +51,7 @@ func main() {
     var bufferSize int
     flag.IntVar(&bufferSize, "b", 4096, "size of reader buffer (bytes)")
 
-    var filenames, leechers, seeders, unallocateds flagList
+    var filenames, leechers, seeders, unallocateds FlagList
     flag.Var(&filenames, "f", "filename(s) to process")
     flag.Var(&leechers, "l", "host to leech file(s)")
     flag.Var(&seeders, "s", "host to seed file(s)")
@@ -68,40 +68,53 @@ func main() {
 
     // add file(s) to seeders
     cids := make([]string, len(filenames))
+
+    // iterate over seeders
     for _, seeder := range seeders {
+        // initialize seeder HTTP API shell
         sh := shell.NewShell(seeder)
 
+        // iterate over filenames
         for fileIndex, filename := range filenames {
+            // open file reader
             f, err := os.Open(filename)
             if err != nil {
                 fmt.Println("failed to open file:", err)
                 continue
             }
 
+            // add file to seeder
             cid, err := sh.Add(f)
             if err != nil {
                 fmt.Println("failed to add file:", err)
                 continue
             }
 
+            // capture file cid
             cids[fileIndex] = cid
         }
     }
 
     // cat file(s) (to nowhere) from each leecher
     ch := make(chan HostDuration)
+
+    // iterate over cids and leechers
     for _, cid := range cids {
         for _, leecher := range leechers {
+            // start new go routine to execute in parallel
             go func(cid string, leecher string) {
+                // initialize leecher HTTP API shell
                 sh := shell.NewShell(leecher)
                 start := time.Now()
 
+                // open file reader
                 r, err := sh.Cat(cid)
                 if err != nil {
                     fmt.Println("failed to read cid:", err)
                     return
                 }
 
+                // read until empty
                 buf := make([]byte, bufferSize)
                 for {
                     _, err := r.Read(buf)
@@ -113,9 +126,11 @@ func main() {
                     }
                 }
 
+                // return leecher host duration
                 elapsed := time.Since(start)
                 ch <- HostDuration{leecher, elapsed}
 
+                // close reader
                 err = r.Close()
                 if err != nil {
                     fmt.Println("failed to close reader:", err)
@@ -143,10 +158,13 @@ func main() {
         "Unallocated": unallocateds,
     }
 
+    // iterate over host types and host addresses
     for hostType, hostAddrsList := range hostAddrsMap {
         for _, hostAddr := range hostAddrsList {
+            // initialize host HTTP API shell
             sh := shell.NewShell(hostAddr)
 
+            // query bitswap stats
             var bitswapStat BitswapStat
             err := sh.Request("bitswap/stat").
                 Exec(context.Background(), &bitswapStat)
@@ -155,23 +173,24 @@ func main() {
                 continue
             }
 
+            // retrieve leech durations (only exists for leechers)
             var t time.Duration
             leecherDuration, exists := leecherDurations[hostAddr]
             if exists {
                 t = leecherDuration
             }
 
+            // add host to hosts
             hosts[hostsIndex] = Host{hostType, hostAddr, t, bitswapStat}
             hostsIndex += 1
         }
     }
 
+    // encode hosts array as json (with indenting) and print
     hostsJSON, err := json.MarshalIndent(hosts, "", "  ")
     if err != nil {
         fmt.Println("failed to marshal hosts as json:", err)
     }
 
     fmt.Println(string(hostsJSON))
-
-    // TODO - cleanup
 }

@@ -66,6 +66,32 @@ func main() {
         os.Exit(1)
     }
 
+    hostAddrsMap := map[string][]string{
+        "Leecher": leechers,
+        "Seeder": seeders,
+        "Unallocated": unallocateds,
+    }
+
+    // gather base statistics
+    baseBitswapStats := make(map[string]BitswapStat)
+    for _, hostAddrsList := range hostAddrsMap {
+        for _, hostAddr := range hostAddrsList {
+            // initialize host HTTP API shell
+            sh := shell.NewShell(hostAddr)
+
+            // query bitswap stats
+            var bitswapStat BitswapStat
+            err := sh.Request("bitswap/stat").
+                Exec(context.Background(), &bitswapStat)
+            if err != nil {
+                fmt.Println("failed to retrieve stats:", err)
+                continue
+            }
+
+            baseBitswapStats[hostAddr] = bitswapStat
+        }
+    }
+
     // add file(s) to seeders
     cids := make([]string, len(filenames))
 
@@ -159,12 +185,6 @@ func main() {
     hosts := make([]Host, len(leechers) + len(seeders) + len(unallocateds))
     hostsIndex := 0
 
-    hostAddrsMap := map[string][]string{
-        "Leecher": leechers,
-        "Seeder": seeders,
-        "Unallocated": unallocateds,
-    }
-
     // iterate over host types and host addresses
     for hostType, hostAddrsList := range hostAddrsMap {
         for _, hostAddr := range hostAddrsList {
@@ -179,6 +199,17 @@ func main() {
                 fmt.Println("failed to retrieve stats:", err)
                 continue
             }
+
+            // substract base bitswap stats
+            baseBitswapStat := baseBitswapStats[hostAddr]
+            bitswapStat.BlocksReceived -= baseBitswapStat.BlocksReceived
+            bitswapStat.BlocksSent -= baseBitswapStat.BlocksSent
+            bitswapStat.DataReceived -= baseBitswapStat.DataReceived
+            bitswapStat.DataReceived -= baseBitswapStat.DataReceived
+            bitswapStat.DataSent -= baseBitswapStat.DataSent
+            bitswapStat.DupBlksReceived -= baseBitswapStat.DupBlksReceived
+            bitswapStat.DupDataReceived -= baseBitswapStat.DupDataReceived
+            bitswapStat.MessagesReceived -= baseBitswapStat.MessagesReceived
 
             // retrieve leech durations (only exists for leechers)
             var t time.Duration

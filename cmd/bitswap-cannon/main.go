@@ -107,7 +107,13 @@ func main() {
                 sh := shell.NewShell(leecher)
                 start := time.Now()
 
-                // open file reader
+                /*err := sh.Get(cid, "/dev/null")
+                if err != nil {
+                    fmt.Println("failed to read cid:", err)
+                    return
+                }*/
+
+                // open file reader with "cat" call
                 r, err := sh.Cat(cid)
                 if err != nil {
                     fmt.Println("failed to read cid:", err)
@@ -143,6 +149,7 @@ func main() {
     leecherDurations := make(map[string]time.Duration)
     for i := 0; i < len(cids) * len(leechers); i++ {
         leecherDuration := <- ch
+        //fmt.Printf("RECV COMPLETED %d\n", i)
 
         // TODO - max of Host? (will receive one for each cid)
         leecherDurations[leecherDuration.Host] = leecherDuration.Duration
@@ -193,4 +200,31 @@ func main() {
     }
 
     fmt.Println(string(hostsJSON))
+
+    // cleanup - iterate over host types and host addresses
+    for hostType, hostAddrsList := range hostAddrsMap {
+        for _, hostAddr := range hostAddrsList {
+            // initialize host HTTP API shell
+            sh := shell.NewShell(hostAddr)
+
+            // iterate over cids
+            if hostType == "Seeder" {
+                for _, cid := range cids {
+                    err := sh.Unpin(cid)
+                    if err != nil {
+                        fmt.Println("failed to unpin cid:", err)
+                        continue
+                    }
+                }
+            }
+
+            // garbage collect repository
+            err := sh.Request("repo/gc").
+                Exec(context.Background(), nil)
+            if err != nil {
+                fmt.Println("failed to garbage collect repo:", err)
+                continue
+            }
+        }
+    }
 }

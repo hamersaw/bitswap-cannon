@@ -48,20 +48,27 @@ type HostDuration struct {
 
 func main() {
     // parse command line arguments
-    var bufferSize int
-    flag.IntVar(&bufferSize, "b", 4096, "size of reader buffer (bytes)")
+    bufferSize := flag.Int("b", 4096, "size of reader buffer (bytes)")
+    filename := flag.String("f", "", "filename to process")
 
-    var filenames, leechers, seeders, unallocateds FlagList
-    flag.Var(&filenames, "f", "filename(s) to process")
+    var leechers, seeders, unallocateds FlagList
     flag.Var(&leechers, "l", "host to leech file(s)")
     flag.Var(&seeders, "s", "host to seed file(s)")
-    flag.Var(&unallocateds, "u", "unallocated hosts (to include in output)")
+    flag.Var(&unallocateds, "u", "unallocated host(s) (to include in output)")
 
     flag.Parse()
 
     // validate arguments
-    if len(filenames) == 0 || len(leechers) == 0 || len(seeders) == 0 {
-        fmt.Println("invalid arguments") // TODO - better message
+    if *filename == "" {
+        fmt.Println("Must specify filename '-f value'")
+        flag.Usage()
+        os.Exit(1)
+    } else if len(leechers) == 0 {
+        fmt.Println("Must specify at least one leecher with '-l value'")
+        flag.Usage()
+        os.Exit(1)
+    } else if len(seeders) == 0 {
+        fmt.Println("Must specify at least one seeder with '-l value'")
         flag.Usage()
         os.Exit(1)
     }
@@ -72,112 +79,87 @@ func main() {
         "Unallocated": unallocateds,
     }
 
-    // gather base statistics
-    baseBitswapStats := make(map[string]BitswapStat)
-    for _, hostAddrsList := range hostAddrsMap {
-        for _, hostAddr := range hostAddrsList {
-            // initialize host HTTP API shell
-            sh := shell.NewShell(hostAddr)
-
-            // query bitswap stats
-            var bitswapStat BitswapStat
-            err := sh.Request("bitswap/stat").
-                Exec(context.Background(), &bitswapStat)
-            if err != nil {
-                fmt.Println("failed to retrieve stats:", err)
-                continue
-            }
-
-            baseBitswapStats[hostAddr] = bitswapStat
-        }
-    }
-
-    // add file(s) to seeders
-    cids := make([]string, len(filenames))
+    // add file to seeders
+    var cid *string
 
     // iterate over seeders
     for _, seeder := range seeders {
         // initialize seeder HTTP API shell
         sh := shell.NewShell(seeder)
 
-        // iterate over filenames
-        for fileIndex, filename := range filenames {
-            // open file reader
-            f, err := os.Open(filename)
-            if err != nil {
-                fmt.Println("failed to open file:", err)
-                continue
-            }
-
-            // add file to seeder
-            cid, err := sh.Add(f)
-            if err != nil {
-                fmt.Println("failed to add file:", err)
-                continue
-            }
-
-            // capture file cid
-            cids[fileIndex] = cid
+        // open file reader
+        f, err := os.Open(*filename)
+        if err != nil {
+            fmt.Println("failed to open file:", err)
+            continue
         }
+
+        // add file to seeder
+        fileCid, err := sh.Add(f)
+        if err != nil {
+            fmt.Println("failed to add file:", err)
+            continue
+        }
+
+        // capture file cid
+        cid = &fileCid
     }
 
-    // cat file(s) (to nowhere) from each leecher
+    // sleep to wait for information to settle
+    time.Sleep(3 * time.Second)
+
+    // cat file (to nowhere) from each leecher
     ch := make(chan HostDuration)
 
-    // iterate over cids and leechers
-    for _, cid := range cids {
-        for _, leecher := range leechers {
-            // start new go routine to execute in parallel
-            go func(cid string, leecher string) {
-                // initialize leecher HTTP API shell
-                sh := shell.NewShell(leecher)
-                start := time.Now()
+    // iterate over leechers
+    for _, leecher := range leechers {
+        // start new go routine to execute in parallel
+        go func(bufferSize int, cid string, leecher string) {
+            // initialize leecher HTTP API shell
+            sh := shell.NewShell(leecher)
+            start := time.Now()
 
-                /*err := sh.Get(cid, "/dev/null")
-                if err != nil {
-                    fmt.Println("failed to read cid:", err)
-                    return
-                }*/
+            /*err := sh.Get(cid, "/dev/null")
+            if err != nil {
+                fmt.Println("failed to read cid:", err)
+                return
+            }*/
 
-                // open file reader with "cat" call
-                r, err := sh.Cat(cid)
-                if err != nil {
-                    fmt.Println("failed to read cid:", err)
-                    return
+            // open file reader with "cat" call
+            r, err := sh.Cat(cid)
+            if err != nil {
+                fmt.Println("failed to read cid:", err)
+                return
+            }
+
+            // read until empty
+            buf := make([]byte, bufferSize)
+            for {
+                _, err := r.Read(buf)
+                if err == io.EOF {
+                    break
+                } else if err != nil {
+                    fmt.Println("failed to read bytes:", err)
+                    continue
                 }
+            }
 
-                // read until empty
-                buf := make([]byte, bufferSize)
-                for {
-                    _, err := r.Read(buf)
-                    if err == io.EOF {
-                        break
-                    } else if err != nil {
-                        fmt.Println("failed to read bytes:", err)
-                        continue
-                    }
-                }
+            // return leecher host duration
+            elapsed := time.Since(start)
+            ch <- HostDuration{leecher, elapsed}
 
-                // return leecher host duration
-                elapsed := time.Since(start)
-                ch <- HostDuration{leecher, elapsed}
-
-                // close reader
-                err = r.Close()
-                if err != nil {
-                    fmt.Println("failed to close reader:", err)
-                }
-            }(cid, leecher)
-        }
+            // close reader
+            err = r.Close()
+            if err != nil {
+                fmt.Println("failed to close reader:", err)
+            }
+        }(*bufferSize, *cid, leecher)
     }
 
     // wait for all retrievals to complete
     leecherDurations := make(map[string]time.Duration)
-    for i := 0; i < len(cids) * len(leechers); i++ {
+    for i := 0; i < len(leechers); i++ {
         leecherDuration := <- ch
-        //fmt.Printf("RECV COMPLETED %d\n", i)
-
-        // TODO - max of Host? (will receive one for each cid)
         leecherDurations[leecherDuration.Host] = leecherDuration.Duration
     }
 
@@ -199,17 +181,6 @@ func main() {
                 fmt.Println("failed to retrieve stats:", err)
                 continue
             }
-
-            // substract base bitswap stats
-            baseBitswapStat := baseBitswapStats[hostAddr]
-            bitswapStat.BlocksReceived -= baseBitswapStat.BlocksReceived
-            bitswapStat.BlocksSent -= baseBitswapStat.BlocksSent
-            bitswapStat.DataReceived -= baseBitswapStat.DataReceived
-            bitswapStat.DataReceived -= baseBitswapStat.DataReceived
-            bitswapStat.DataSent -= baseBitswapStat.DataSent
-            bitswapStat.DupBlksReceived -= baseBitswapStat.DupBlksReceived
-            bitswapStat.DupDataReceived -= baseBitswapStat.DupDataReceived
-            bitswapStat.MessagesReceived -= baseBitswapStat.MessagesReceived
 
             // retrieve leech durations (only exists for leechers)
             var t time.Duration
@@ -238,14 +209,12 @@ func main() {
             // initialize host HTTP API shell
             sh := shell.NewShell(hostAddr)
 
-            // iterate over cids
+            // if seeder -> unpin cid
             if hostType == "Seeder" {
-                for _, cid := range cids {
-                    err := sh.Unpin(cid)
-                    if err != nil {
-                        fmt.Println("failed to unpin cid:", err)
-                        continue
-                    }
+                err := sh.Unpin(*cid)
+                if err != nil {
+                    fmt.Println("failed to unpin cid:", err)
+                    continue
                 }
             }
 

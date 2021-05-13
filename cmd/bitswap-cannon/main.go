@@ -81,10 +81,7 @@ func main() {
 
     // add file to seeders
     var cid *string
-
-    // iterate over seeders
     for _, seeder := range seeders {
-        // initialize seeder HTTP API shell
         sh := shell.NewShell(seeder)
 
         // open file reader
@@ -118,12 +115,6 @@ func main() {
             // initialize leecher HTTP API shell
             sh := shell.NewShell(leecher)
             start := time.Now()
-
-            /*err := sh.Get(cid, "/dev/null")
-            if err != nil {
-                fmt.Println("failed to read cid:", err)
-                return
-            }*/
 
             // open file reader with "cat" call
             r, err := sh.Cat(cid)
@@ -159,7 +150,7 @@ func main() {
     // wait for all retrievals to complete
     leecherDurations := make(map[string]time.Duration)
     for i := 0; i < len(leechers); i++ {
-        leecherDuration := <- ch
+        leecherDuration := <-ch
         leecherDurations[leecherDuration.Host] = leecherDuration.Duration
     }
 
